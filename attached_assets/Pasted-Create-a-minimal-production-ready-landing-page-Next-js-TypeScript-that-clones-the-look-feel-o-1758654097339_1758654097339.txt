@@ -1,0 +1,96 @@
+Create a minimal, production-ready landing page (Next.js + TypeScript) that clones the look & feel of https://www.odivend.com while simplifying components for faster load & conversion. Use Tailwind CSS for styling and make it easy to deploy to Vercel. Follow these exact requirements:
+
+Project tech stack and setup
+- Next.js 14 (or latest stable) with TypeScript.
+- Tailwind CSS configured.
+- Use Google Fonts: Poppins (for headings) and Inter (for body).
+- Provide a `package.json` and a simple `README.md` with run instructions (`npm install`, `npm run dev`).
+- Ensure the site is SEO & ad-conversion friendly (meta tags + open graph).
+
+Design, theme & assets
+- Global dark theme: near-pitch-black background `#050507` (or `#08080A`), white main text `#FFFFFF`.
+- Accent / highlight color: vivid cyan `#00E5FF`.
+- Secondary text: muted greys (e.g., `#9AA0A6` for body-muted).
+- Headings: bold geometric (Poppins, 600–800 weight). Body: Inter, 400–500 weight.
+- Minimal, modern layout with generous spacing and clear visual hierarchy.
+- Responsive and mobile-first.
+
+Page sections & behavior
+1. Header (sticky top)
+   - Left: simple logo text "YourBrand" (or SVG placeholder).
+   - Right: primary CTA buttons: "Book a Call" (primary fill with cyan) and "Book a Demo" (outline).
+   - Header should be transparent over hero then slightly blurred/dark on scroll (subtle).
+
+2. Hero (above the fold)
+   - Big headline that reads: "Don't hire more. Automate better. With AI."
+   - Subheading: one line summary: "AI chatbots, voice agents, and lead-campaign systems built to convert."
+   - Primary CTA (cyan solid): "Book a Call" — link to a provided Calendly / scheduling URL placeholder.
+   - Secondary CTA (outline): "Watch Demo" — scrolls to video section.
+   - Tiny social proof row under subheading (3 short logos or short trust line e.g. "Trusted by MSMEs & startups").
+
+3. VSL / Video section (prominent)
+   - Responsive YouTube embed (16:9) centered; lazy-load iframe.
+   - Above or below video: brief caption "Watch how we turn ad clicks into booked calls".
+   - When user clicks play, record a data- attribute for analytics (placeholder integration).
+   - Include a secondary CTA near video: "Book a Demo" with a calendar link.
+
+4. Services (single row or stacked cards)
+   - Minimal three cards with icons, title, 1-2 line description, and small CTA per card:
+     1. Chatbots — "WhatsApp, website and messenger bots that capture & qualify leads."
+     2. Voice Agents — "Automated calling & IVR agents to reach leads at scale."
+     3. Lead Campaign System — "End-to-end lead capture, nurture, follow-up & reporting."
+   - Each card: hover lift, cyan border accent, short bullet points (3 max).
+   - CTA per card: "Book a Call" (opens modal or link).
+
+5. How it works / Process (3 steps)
+   - Step 1: 15-minute discovery call
+   - Step 2: Pilot setup & integration
+   - Step 3: Launch & scale with dashboards
+   - Minimal icons and short copy.
+
+6. Social proof / testimonial area (minimal)
+   - One or two testimonials (name, title, short quote) and optional logos strip.
+
+7. Footer
+   - Contact links (email / WhatsApp), small legal links, and small copyright.
+
+Conversion behavior & integrations
+- Primary conversion flows:
+  - "Book a Call" should open an external scheduling link (Calendly or placeholder). Include an accessible modal fallback contact form for users who don’t want to leave the page.
+  - "Book a Demo" similar flow; demo can be scheduled via the same or different URL.
+- Include placeholder snippet sections for:
+  - Google Analytics / GA4 measurement (commented placeholder).
+  - Meta pixel (commented placeholder).
+  - UTM-friendly link structure so landing works with Instagram ad traffic.
+- Add accessible attributes (aria-labels, focus states) and keyboard-accessible modals.
+
+Accessibility & performance
+- Lighthouse-friendly: lazy-load images, avoid heavy animation, use optimized SVG icons.
+- Provide sensible `alt` text and semantic HTML (header, main, section, footer).
+- Ensure good color contrast on dark background for WCAG AA.
+
+File/components expectations
+- `pages/index.tsx` — main page, composed of small components.
+- `components/Header.tsx`, `components/Hero.tsx`, `components/Video.tsx`, `components/Services.tsx`, `components/Process.tsx`, `components/Testimonial.tsx`, `components/Footer.tsx`
+- Minimal CSS in `globals.css` imported by Tailwind; use utility classes for almost everything.
+- Include a small `utils/tracking.ts` with commented placeholders for recording click events (video play, CTA clicks).
+
+Starter copy & placeholders (replace this with final copy later)
+- Headline: "Don't hire more. Automate better. With AI."
+- Subhead: "We build chatbots, voice agents, and lead-campaign systems that convert ad traffic into paying customers."
+- Service short descriptions: (use the three bullets described above).
+- Calendly / scheduling link placeholders: `https://calendly.com/your-company/15min` (replaceable)
+
+Deliverables (what I expect from this Replit run)
+- A complete Next.js + TypeScript project directory ready to `npm install` and `npm run dev`.
+- Clean, readable code with comments where integrations should be added.
+- A short README with run/deploy steps and where to replace scheduling/analytics links.
+- Optional: a simple export-ready `index.html` static version if requested.
+
+Extra notes to the code generator
+- Keep the page minimalist and fast; do not fetch remote heavy libraries other than Google Fonts and Tailwind.
+- Use Tailwind’s dark mode; but default the site to the dark theme described.
+- Make the primary CTA visually dominant (cyan filled rounded pill).
+- Use subtle micro-interactions: hover lifts, slight fade-in on scroll.
+
+End of prompt.

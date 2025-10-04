@@ -1,0 +1,48 @@
+Project: Live Voice Agent Demo (SleeckOS) — React + Node
+
+Build a runnable Replit project that adds a "Live Voice Agent Demo" component to our website. The demo must let users book a call using voice. Requirements:
+
+1. Architecture
+   - Frontend: React component `LiveVoiceAgentDemo.jsx` in `client/src/`.
+   - Backend: Node + Express `server/index.js` exposing `/api/agent` and `/api/book`.
+   - Environment secrets: OPENAI_API_KEY, CALENDLY_BASE_LINK.
+
+2. Behavior
+   - When user clicks "Book call using voice agent", start a voice session.
+   - Use Web Speech API (SpeechRecognition) for capturing user voice (interim and final).
+   - Send final transcripts to `POST /api/agent` as `{ sessionId, text, final:true }`.
+   - Server calls OpenAI ChatCompletion with an instructional system prompt directing the model to:
+     * be a polite voice booking assistant named "SleeckOS Agent"
+     * ask one question at a time
+     * collect name, phone, email
+     * return a JSON-like response with `replyText`, `askFor`, and `readyToBook`
+   - Server responds with `{ replyText, askFor, readyToBook, sessionState }`.
+   - Client uses SpeechSynthesis to speak `replyText` aloud to the user and continues the collection loop.
+   - After all slots are collected and user confirms, client calls `POST /api/book` with the collected fields; server returns a `calendlyUrl` (constructed from `CALENDLY_BASE_LINK` + prefill query params).
+   - Client opens `calendlyUrl` in a new tab, and displays final confirmation message.
+
+3. UI and UX
+   - Show live transcript, agent replies, and slot collection status on screen.
+   - Provide a "Stop session" button.
+   - If Web Speech API is unavailable, allow manual text entry to send to the agent.
+
+4. Server Implementation details
+   - `POST /api/agent`:
+       - Input: `{ sessionId, text, final }`
+       - Behavior: maintain session slots & messages in-memory, build messages array for OpenAI, call ChatCompletion, parse assistant output (the assistant should respond with a JSON fragment that contains `replyText`, `askFor`, `readyToBook`), store state, and return JSON.
+   - `POST /api/book`:
+       - Input: `{ name, phone, email }`
+       - Output: `{ calendlyUrl }` — construct `calendlyUrl = CALENDLY_BASE_LINK + 'name=' + encodeURIComponent(name) + '&email=' + encodeURIComponent(email) + '&a1=' + encodeURIComponent(phone)`.
+   - Protect `OPENAI_API_KEY` via environment variable. Add helpful console logs and error handling.
+
+5. Provide:
+   - Full server code (`server/index.js`) with instructions to `npm install` (express, node-fetch or axios, dotenv if needed).
+   - Full React code (`client/src/LiveVoiceAgentDemo.jsx`) using browser Web Speech APIs and fetch calls to the server.
+   - `client/src/index.js` to render the demo.
+   - README or Replit run instructions (how to add secrets).
+   - Comments explaining where the developer should replace Calendly link format if necessary.
+
+6. Keep it simple, well commented and copy-paste ready. Use only free browser APIs and OpenAI (server side). Do not integrate paid telephony (Twilio) for this demo.
+
+Return all files in a Replit-friendly structure in the response, with code blocks for each file and a final short section "How to run on Replit" listing steps (add secrets, run server, open webview).
+

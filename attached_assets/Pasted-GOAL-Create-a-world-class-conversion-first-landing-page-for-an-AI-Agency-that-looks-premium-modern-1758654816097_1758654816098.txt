@@ -1,0 +1,84 @@
+GOAL
+Create a world-class, conversion-first landing page for an AI Agency that looks premium, modern, and trustworthy — optimized for Instagram ad traffic and built to convert leads into booked calls/demos. Use AI-generated design assets, microcopy, and UX patterns to maximize trust and reduce friction. Default tech: Next.js + TypeScript + Tailwind (but generate design assets and component specs that are implementation-agnostic).
+
+THEMES & VISUAL SPECS
+- Dark, premium baseline: background #050507 (near-pitch-black). Primary text: #FFFFFF. Accent / highlight: cyan #00E5FF. Secondary text: muted greys (#9AA0A6 / #6F757B).
+- Typography: Headings — Poppins (600–800) or Montserrat / Inter Display. Body — Inter (400–500). Sizes: hero H1 ~48–64px desktop, 28–36px mobile; body base 16px.
+- Design tokens: supply colors, spacing scale (4/8/16/24/32/48), border radius tokens (6/12/24), elevation shadows.
+- Imagery: AI-generated hero illustration (abstract neon circuitry / AI brain + human silhouette) and 8 custom SVG icons (chatbot, phone/voice, funnel/lead, analytics, integration, security, trust badge, calendar). Provide AVIF/WebP exports and SVG source.
+
+USER EXPERIENCE & STRUCTURE (must include)
+1. Sticky header with brand, social proof (tiny logos), and two CTAs: "Book a Call" (primary cyan filled pill) and "Book a Demo" (outline). Header transitions from transparent → blurred dark on scroll.
+2. Hero (A/B 3 variations generated):
+   - Variant A (Trust-first): bold claim + proof line + CTA + micro-trust logos
+   - Variant B (Problem-first): pain point headline + 15s VSL CTA + demo book
+   - Variant C (Social-proof-first): success stat + testimonial + CTA
+   Provide recommended hero copy options (3 per variant) and which ad audiences map to which hero.
+3. VSL Section: responsive lazy-loaded YouTube iframe, caption + transcript toggle, "Book Demo" CTA near video, analytics event on play (video_play).
+4. Services cards (3): Chatbots, Voice Agents, Lead Campaign System. Each card: title, 1-line value prop, 3 short benefits, micro-CTA, accent cyan border, hover lift.
+5. How it Works — 3-step process with micro-animations and icons.
+6. Proof & Results — dynamic testimonial carousel, logos strip, 2 short case studies with metrics (e.g., “3.2x lead-to-demo conversion in 30 days”).
+7. Conversion module — persistent sticky CTA on mobile, multi-step booking modal (date/time via Calendly, fallback contact form if they close), exit-intent modal with VSL or discount.
+8. Footer — contact, privacy, T&Cs, small trust badges (GDPR, secure, verified).
+
+AI-SPECIFIC FEATURES & PERSONALIZATION (must include)
+- AI-generated personalization:
+  - Use UTM + geo (via IP) to swap hero headline and testimonial dynamically (e.g., show local case studies).
+  - Show recommended service card based on ad campaign UTM (e.g., utm_campaign=whatsapp → highlight Chatbots).
+- On-page AI assistant widget (chat): lightweight assistant that can answer FAQs, capture leads, and pre-qualify (questions, score). Provide chat flow script and event hooks for webhook/n8n.
+- Voice demo: short 20–40s voice agent sample with waveform & transcript. Play sample inline.
+- AI-generated microcopy: provide 8 headline variants, 12 supporting lines, and 6 CTAs optimized per ad audience (cold / warm / retarget).
+- Auto-generated images & icons: supply prompts for producing hero art, icons, and testimonial portrait stylings.
+
+CONVERSION & TRUST PATTERNS (required)
+- Primary CTAs: Book a Call (open scheduling), Book a Demo (modal scheduling). Both should be trackable (event names: cta_book_call, cta_book_demo).
+- Low-friction contact fallback: 3-field micro-form (name, phone/email, short note) + "I prefer WhatsApp" quick opt-in.
+- Risk reversal: short guarantee line (e.g., "15-min discovery — no Obligation").
+- Social proof hierarchy: logos → short video testimonial → quantitative case study → full testimonial modal.
+- Urgency mechanism: show real-time availability snippets (e.g., "3 slots left this week") generated client-side.
+- A/B experiments: map out two testable hypotheses (headline, hero image, CTA color/placement), and instructions for tracking and evaluating.
+
+PERFORMANCE, SEO & ANALYTICS
+- Lighthouse targets: LCP <1.2s, FID <100ms, CLS <0.1. Use lazy-loading, preload fonts/critical images, and inline critical CSS.
+- SEO: meta title templates for ad landing pages, OG tags auto-filled from UTM/campaign (generate example meta descriptions).
+- Analytics & pixels: provide code snippets and event mapping for GA4, Meta Pixel, and conversion events; include server-side event fallback suggestion.
+- Event tracking map: at minimum track page_view, vsl_play, cta_book_call, cta_book_demo, form_submit, chat_started, chat_submitted.
+
+INTEGRATIONS & DEPLOYMENT
+- Provide recommended integrations and short config steps:
+  - Calendly/YouCanBook.me for scheduling
+  - HubSpot/Pipedrive/Zoho + webhook via n8n to route leads & send automated SMS/WhatsApp
+  - Google Drive or S3 for media hosting
+  - Optional: Crisp / Intercom or open-source chat that supports webhook lead export
+- Provide pre-built webhook payload examples (JSON) for integration with n8n.
+- Provide a minimal privacy & cookie consent flow (GDPR).
+
+ACCESSIBILITY & SECURITY
+- WCAG AA contrast, keyboard accessible modals, aria labels, focus outlines.
+- CSP basics and notes on secure headers for production.
+- Small accessibility checklist.
+
+DELIVERABLES (what to output)
+1. A design spec (Figma-like): hero art, tokens, icons, and component library (header, hero, video, cards, modal).
+2. 3 hero variants with precise copy and recommended audience mapping.
+3. Microcopy bank: 8 headlines, 12 subheads, 6 CTAs, 10 trust lines.
+4. Event mapping & tracking plan (GA4 + Meta Pixel + analytics events).
+5. Integration guide & webhook samples.
+6. Implementation-ready components: React + Tailwind component skeletons (no heavy stylesheets), with comments where integrations/pixel code goes.
+7. A/B test plan (two experiments) and success metrics.
+8. Exportable assets (SVG, WebP/AVIF) and the AI prompts used to generate them (so you can re-run or tweak).
+
+QUALITY & TONE
+- Tone should be confident, concise, benefit-led, and trustworthy (no hyperbole). Use active verbs and numbers where possible.
+- Visual feel: premium, tech-luxury, modern, minimal.
+
+EXTRA: AI PROMPTS FOR GENERATIVE ASSETS (include at least these)
+- Hero illustration prompt (detailed)
+- Icon set prompt (8 icons)
+- Testimonial portrait stylization prompt
+- Short VSL thumbnail prompt
+
+FINAL NOTE FOR THE GENERATOR
+- Prioritize speed and clarity — keep the UX minimal but persuasive. Produce a package that a dev team can implement quickly (components + assets + copy + analytics plan). Output all items in clearly labeled files/sections so I can copy & paste into a repo or feed into Replit.
+
+END
