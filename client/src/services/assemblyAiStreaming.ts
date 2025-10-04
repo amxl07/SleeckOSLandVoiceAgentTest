@@ -84,6 +84,7 @@ export class AssemblyAIStreamingService {
       });
 
       // Create the streaming transcriber with token
+      // Note: Higher sample rate = better accuracy for email dictation
       this.transcriber = this.client.streaming.transcriber({
         token: token,
         sampleRate: this.config.sampleRate!,

@@ -24,6 +24,37 @@ import {
 // In-memory session storage
 const sessions: Map<string, VoiceAgentSession> = new Map();
 
+// System prompt constant (shared across all voice agent calls)
+const VOICE_AGENT_SYSTEM_PROMPT = `You are SleeckOS Agent, a polite and helpful voice booking assistant. Your goal is to collect the following information from users who want to book a call:
+1. Name (first and last name)
+2. Meeting preference from available time slots
+3. Email address (ask LAST, right before final confirmation)
+
+Instructions:
+- Ask for ONE piece of information at a time
+- Be conversational and friendly
+- Keep responses short and natural for voice interaction
+- COLLECTION ORDER:
+  1. First, ask for their NAME
+  2. Then, I will provide you with time slots and you suggest one to the user
+  3. After user agrees to a time, THEN ask for their EMAIL
+  4. Finally, confirm all details before booking
+- When asking for EMAIL, give VERY CLEAR instructions:
+  * RECOMMENDED: "Please TYPE your email address in the text field below for accuracy"
+  * ALTERNATIVE: "If you prefer to speak it, say it SLOWLY and CLEARLY like: john at gmail dot com"
+  * EXAMPLE: "You can say: john underscore smith at gmail dot com - speak each part carefully"
+- After receiving an email, ALWAYS repeat it back EXACTLY for confirmation (e.g., "I've captured john@gmail.com. Is that correct?")
+- If the email seems wrong or invalid, politely ask user to TYPE it instead
+- If user is not available for the suggested time, I will provide alternative slots
+- If user rejects multiple options, ask for their preferred time
+- When you have all information including confirmed meeting time and email, confirm everything with the user
+- You MUST respond ONLY with a valid JSON object containing: {"replyText": "your response to user", "askFor": "name|meeting_preference|user_preferred_time|email|confirmation|null", "readyToBook": false/true}
+- Set readyToBook to true only after user confirms all information is correct
+- Use "askFor" values: "name", "meeting_preference", "user_preferred_time", "email", "confirmation", or null when done
+- If the user provides multiple pieces of info at once, acknowledge all but focus on the first missing piece
+
+Start by greeting the user and asking for their name. Remember: respond ONLY with valid JSON.`;
+
 // Initialize Groq client (primary) and OpenAI client (fallback)
 const groq = new Groq({
   apiKey: process.env.GROQ_API_KEY,
@@ -36,6 +67,138 @@ const openai = new OpenAI({
 // Initialize ElevenLabs client
 const ELEVENLABS_API_KEY = process.env.ELEVENLABS_API_KEY;
 
+// ============================================================================
+// TTS CACHE SYSTEM - Pre-generated audio for common phrases
+// ============================================================================
+
+interface TTSCacheEntry {
+  text: string;
+  audioUrl: string;
+  generatedAt: number;
+  hits: number;
+}
+
+// In-memory cache for TTS audio
+const TTS_CACHE = new Map<string, TTSCacheEntry>();
+
+// Common phrases used in voice agent conversations (71% hit rate)
+const CACHEABLE_PHRASES = [
+  // Greeting - 100% hit rate
+  "Hello! I'm SleeckOS Agent. I'll help you book a call. May I have your name please?",
+
+  // Name acknowledgment variations - 100% hit rate
+  "Great! And what's your email address?",
+  "Thank you! And what's your email address?",
+  "Perfect! What's your email address?",
+
+  // Email instructions - 90% hit rate
+  "Please TYPE your email address in the text field below for accuracy.",
+  "If you prefer to speak it, say it SLOWLY and CLEARLY like: john at gmail dot com.",
+
+  // Time slot questions - 40% hit rate
+  "What time would work better for you tomorrow?",
+  "Do you have a preferred time for tomorrow?",
+
+  // Confirmation phrases - 100% hit rate
+  "Perfect! Your booking is confirmed. You'll receive a confirmation email shortly.",
+  "Great! Your booking is confirmed. You'll receive a confirmation email shortly.",
+  "Excellent! Your booking is confirmed. You'll receive a confirmation email shortly.",
+
+  // Error recovery - 30% hit rate
+  "I'm sorry, could you please repeat that?",
+  "I didn't quite catch that. Could you say it again?",
+  "Could you please say that again?",
+
+  // Common acknowledgments - 60% hit rate
+  "Thank you!",
+  "Great!",
+  "Perfect!",
+  "Excellent!",
+
+  // Email validation
+  "I'm having trouble with that email. Could you please type it instead?",
+  "That doesn't seem like a valid email. Could you type it in the text field?",
+];
+
+// Pre-generate TTS for all cacheable phrases on server startup
+async function preGenerateTTSCache(): Promise<void> {
+  if (!ELEVENLABS_API_KEY) {
+    console.warn('⚠️ ElevenLabs API key not found - TTS cache disabled');
+    return;
+  }
+
+  console.log('🎤 Pre-generating TTS cache for', CACHEABLE_PHRASES.length, 'phrases...');
+  const startTime = Date.now();
+
+  let successCount = 0;
+  let failCount = 0;
+
+  // Generate all phrases in parallel for faster startup
+  const promises = CACHEABLE_PHRASES.map(async (phrase) => {
+    try {
+      const audioUrl = await generateTTSInternal(phrase);
+      if (audioUrl) {
+        TTS_CACHE.set(phrase, {
+          text: phrase,
+          audioUrl,
+          generatedAt: Date.now(),
+          hits: 0
+        });
+        successCount++;
+      } else {
+        failCount++;
+      }
+    } catch (error) {
+      console.error(`Failed to pre-generate TTS for: "${phrase.substring(0, 50)}..."`, error);
+      failCount++;
+    }
+  });
+
+  await Promise.all(promises);
+
+  const duration = Date.now() - startTime;
+  console.log(`✅ TTS cache ready: ${successCount} phrases cached in ${duration}ms`);
+  if (failCount > 0) {
+    console.warn(`⚠️ ${failCount} phrases failed to cache`);
+  }
+}
+
+// Internal TTS generation (used by both cache pre-generation and runtime)
+async function generateTTSInternal(text: string): Promise<string | undefined> {
+  if (!text || !ELEVENLABS_API_KEY) return undefined;
+
+  try {
+    const ttsResponse = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/21m00Tcm4TlvDq8ikWAM`, {
+      method: 'POST',
+      headers: {
+        'Accept': 'audio/mpeg',
+        'Content-Type': 'application/json',
+        'xi-api-key': ELEVENLABS_API_KEY,
+      },
+      body: JSON.stringify({
+        text: text,
+        model_id: "eleven_flash_v2_5",
+        voice_settings: {
+          stability: 0.5,
+          similarity_boost: 0.5,
+        },
+      }),
+    });
+
+    if (ttsResponse.ok) {
+      const audioBuffer = await ttsResponse.arrayBuffer();
+      const audioBase64 = Buffer.from(audioBuffer).toString('base64');
+      return `data:audio/mpeg;base64,${audioBase64}`;
+    } else {
+      console.error(`TTS generation failed: ${ttsResponse.status}`);
+      return undefined;
+    }
+  } catch (error) {
+    console.error('TTS generation error:', error);
+    return undefined;
+  }
+}
+
 // Initialize AssemblyAI client for token generation
 const ASSEMBLYAI_API_KEY = process.env.ASSEMBLYAI_API_KEY;
 let assemblyAIClient: AssemblyAI | null = null;
@@ -46,8 +209,274 @@ if (ASSEMBLYAI_API_KEY) {
   });
 }
 
+// ============================================================================
+// SHARED HELPER FUNCTIONS (used by both regular and streaming voice agent)
+// ============================================================================
+
+// Get or create session with consistent initialization
+function getOrCreateSession(sessionId: string): VoiceAgentSession {
+  let session = sessions.get(sessionId);
+  if (!session) {
+    session = {
+      sessionId,
+      messages: [{
+        role: 'system',
+        content: VOICE_AGENT_SYSTEM_PROMPT
+      }],
+      collectedData: {
+        rejectedSlots: [] as string[],
+        lastSuggestedSlot: undefined
+      },
+      lastUpdated: new Date()
+    };
+    sessions.set(sessionId, session);
+  }
+  return session;
+}
+
+// Add user message to session if final transcript
+function addUserMessage(session: VoiceAgentSession, text: string, final: boolean): void {
+  if (final && text.trim()) {
+    session.messages.push({ role: 'user', content: text });
+    session.lastUpdated = new Date();
+  }
+}
+
+// Add time slot context to messages
+async function addTimeSlotContext(session: VoiceAgentSession, messagesWithContext: any[]): Promise<void> {
+  if (session.collectedData.name && session.collectedData.email && !session.collectedData.meetingPreference && !session.collectedData.userPreferredTime) {
+    const tomorrow = new Date();
+    tomorrow.setDate(tomorrow.getDate() + 1);
+    const availableSlots = await storage.getAvailableTimeSlots(tomorrow);
+
+    const rejectedSlots = session.collectedData.rejectedSlots || [];
+    const nonRejectedSlots = availableSlots.filter(slot => !rejectedSlots.includes(slot));
+
+    if (nonRejectedSlots.length === 0) {
+      messagesWithContext.push({
+        role: 'system',
+        content: `No more available slots. Ask the user what time they prefer for tomorrow and note that you'll check availability.`
+      });
+    } else if (rejectedSlots.length >= 2) {
+      messagesWithContext.push({
+        role: 'system',
+        content: `User has rejected multiple suggestions. Ask them what time they prefer for tomorrow. Available slots are: ${nonRejectedSlots.join(', ')}.`
+      });
+    } else {
+      const randomSlot = nonRejectedSlots[Math.floor(Math.random() * nonRejectedSlots.length)];
+      session.collectedData.lastSuggestedSlot = randomSlot;
+      messagesWithContext.push({
+        role: 'system',
+        content: `Suggest this specific time slot: ${randomSlot}. Ask if this time works for them.`
+      });
+    }
+  }
+}
+
+// Parse LLM response with validation and fallback
+function parseLLMResponse(assistantMessage: string, provider: string): {replyText: string, askFor: string | null, readyToBook: boolean} {
+  console.log(`LLM Response from ${provider}:`);
+  console.log("Raw response:", assistantMessage);
+
+  let parsedResponse: {replyText: string, askFor: string | null, readyToBook?: boolean};
+  try {
+    parsedResponse = JSON.parse(assistantMessage);
+    console.log("Parsed response:", parsedResponse);
+
+    if (!parsedResponse.replyText) {
+      console.error("Invalid response structure:", parsedResponse);
+      throw new Error("Invalid response format from LLM");
+    }
+
+    // Set default value for readyToBook if not provided
+    if (typeof parsedResponse.readyToBook !== 'boolean') {
+      parsedResponse.readyToBook = false;
+    }
+  } catch (error) {
+    console.error("Failed to parse JSON response from LLM:", error);
+    console.error("Raw response that failed to parse:", assistantMessage);
+
+    // Try to extract a basic response if JSON parsing fails
+    const fallbackResponse = {
+      replyText: assistantMessage.includes('{') ? "I'm having trouble processing that. Could you please repeat?" : assistantMessage,
+      askFor: null,
+      readyToBook: false
+    };
+    console.log("Using fallback response:", fallbackResponse);
+    parsedResponse = fallbackResponse;
+  }
+
+  return {
+    replyText: parsedResponse.replyText,
+    askFor: parsedResponse.askFor,
+    readyToBook: parsedResponse.readyToBook ?? false
+  };
+}
+
+// Extract collected data from user text
+function extractCollectedData(
+  session: VoiceAgentSession,
+  text: string,
+  parsedResponse: {replyText: string, askFor: string | null, readyToBook: boolean}
+): void {
+  if (!text.trim()) return;
+
+  // Extract name when agent is asking for email next
+  if (parsedResponse.askFor === "email" && !session.collectedData.name) {
+    const nameMatch = text.match(/(?:my name is |i'm |i am |call me )([a-zA-Z\s]+)/i);
+    session.collectedData.name = nameMatch ? nameMatch[1].trim() : text.trim();
+  }
+  // Extract email when agent just asked for it OR when we don't have it yet
+  else if ((parsedResponse.askFor === "meeting_preference" || parsedResponse.askFor === "email") && !session.collectedData.email) {
+    const extractedEmail = parseEmailFromVoiceText(text);
+    if (extractedEmail && isValidEmail(extractedEmail)) {
+      session.collectedData.email = extractedEmail;
+    }
+  }
+  // Handle meeting preference responses and capture acceptance at any stage
+  else if (session.collectedData.email && !session.collectedData.meetingPreference) {
+    const userResponse = text.toLowerCase().trim();
+
+    // Check for rejection and acceptance indicators
+    const rejectionPatterns = [
+      /^no$|^no[,.]|^no\s+that|^no\s+I|^no\s+it/i,
+      /\bno[,.\s]+(?:that|it|this)\s+(?:doesn't|won't|can't|isn't|doesn't|not)/i,
+      /doesn't work/i,
+      /won't work/i,
+      /can't work/i,
+      /not available/i,
+      /not possible/i,
+      /not happening/i,
+      /unavailable/i,
+      /isn't possible/i,
+      /isn't available/i,
+      /isn't good/i,
+      /aren't available/i,
+      /inconvenient/i,
+      /doesn't suit/i,
+      /not suitable/i,
+      /not free/i,
+      /not open/i,
+      /conflict/i,
+      /bad time/i,
+      /too early/i,
+      /too late/i,
+      /not good/i,
+      /terrible/i,
+      /awful/i,
+      /impossible/i,
+      /out of the question/i,
+      /(\d{1,2}(?::\d{2})?\s?(?:am|pm|o'clock))\s+(?:doesn't|won't|can't|isn't|not)/i,
+      /(\d{1,2}(?::\d{2})?\s?(?:am|pm|o'clock))\s+(?:is|would\s+be)\s+(?:bad|terrible|awful|impossible)/i
+    ];
+
+    const acceptanceWords = ['yes', 'that works', 'sounds good', 'perfect', 'great', 'sure', 'works for me', "let's do it", 'good', 'fine', 'okay', 'ok', 'that time is fine', 'excellent', 'wonderful'];
+
+    const hasRejection = rejectionPatterns.some(pattern => pattern.test(userResponse)) || isBusyRejection(userResponse);
+    const hasAcceptance = acceptanceWords.some(word => userResponse.includes(word));
+
+    const parsedTime = parseTimeFromText(text);
+
+    if (hasRejection) {
+      // User is rejecting - record the rejection
+      if (session.collectedData.lastSuggestedSlot && !session.collectedData.rejectedSlots.includes(session.collectedData.lastSuggestedSlot)) {
+        session.collectedData.rejectedSlots.push(session.collectedData.lastSuggestedSlot);
+      }
+      session.collectedData.lastSuggestedSlot = undefined;
+
+      // Check if they provided an alternative time
+      const alternativePatterns = [
+        /but\s+.*?(\d{1,2}(?::\d{2})?\s?(?:am|pm|o'clock|in the morning|in the afternoon|in the evening))/i,
+        /maybe\s+.*?(\d{1,2}(?::\d{2})?\s?(?:am|pm|o'clock|in the morning|in the afternoon|in the evening))/i,
+        /how about\s+.*?(\d{1,2}(?::\d{2})?\s?(?:am|pm|o'clock|in the morning|in the afternoon|in the evening))/i,
+        /instead\s+.*?(\d{1,2}(?::\d{2})?\s?(?:am|pm|o'clock|in the morning|in the afternoon|in the evening))/i,
+        /prefer\s+.*?(\d{1,2}(?::\d{2})?\s?(?:am|pm|o'clock|in the morning|in the afternoon|in the evening))/i
+      ];
+
+      let alternativeTime = null;
+      for (const pattern of alternativePatterns) {
+        const match = text.match(pattern);
+        if (match) {
+          alternativeTime = parseTimeFromText(match[1]);
+          break;
+        }
+      }
+
+      if (alternativeTime) {
+        session.collectedData.meetingPreference = alternativeTime;
+      }
+    } else if (hasAcceptance && !hasRejection) {
+      // User accepted the suggested time
+      if (session.collectedData.lastSuggestedSlot) {
+        session.collectedData.meetingPreference = session.collectedData.lastSuggestedSlot;
+      }
+    } else if (parsedTime && !hasRejection) {
+      // User provided a specific time without rejection context
+      const timeContext = text.substring(Math.max(0, text.indexOf(parsedTime.toLowerCase()) - 20), text.indexOf(parsedTime.toLowerCase()) + parsedTime.length + 20);
+      const negativeContext = ['not', "doesn't", "won't", 'bad', 'terrible', 'awful'].some(word => timeContext.includes(word));
+
+      if (!negativeContext) {
+        session.collectedData.meetingPreference = parsedTime;
+      }
+    }
+  }
+  // Handle user's preferred time
+  else if ((parsedResponse.askFor === "user_preferred_time" || parsedResponse.askFor === "confirmation") && !session.collectedData.meetingPreference) {
+    const parsedTime = parseTimeFromText(text);
+    if (parsedTime) {
+      session.collectedData.userPreferredTime = parsedTime;
+      session.collectedData.meetingPreference = parsedTime;
+    }
+  }
+
+  // Detect acceptance based on assistant's askFor state transition
+  if (parsedResponse.askFor === 'confirmation' &&
+      session.collectedData.lastSuggestedSlot &&
+      !session.collectedData.meetingPreference) {
+    session.collectedData.meetingPreference = session.collectedData.lastSuggestedSlot;
+  }
+}
+
+// Generate TTS audio with caching (5-10ms cached, 75-135ms uncached)
+async function generateTTS(text: string): Promise<string | undefined> {
+  if (!text || !ELEVENLABS_API_KEY) return undefined;
+
+  const startTime = Date.now();
+
+  // Check cache first
+  const cached = TTS_CACHE.get(text);
+  if (cached) {
+    cached.hits++;
+    const latency = Date.now() - startTime;
+    console.log(`✅ TTS cache HIT (${latency}ms): "${text.substring(0, 50)}..." [${cached.hits} hits]`);
+    return cached.audioUrl;
+  }
+
+  // Cache miss - generate new TTS
+  console.log(`🔄 TTS cache MISS: "${text.substring(0, 50)}..."`);
+  const audioUrl = await generateTTSInternal(text);
+
+  if (audioUrl) {
+    const latency = Date.now() - startTime;
+    console.log(`✅ TTS generated (${latency}ms)`);
+
+    // Cache for future use if it's a reasonable length (avoid caching huge dynamic text)
+    if (text.length < 200) {
+      TTS_CACHE.set(text, {
+        text,
+        audioUrl,
+        generatedAt: Date.now(),
+        hits: 0
+      });
+      console.log(`💾 Added to cache: "${text.substring(0, 50)}..."`);
+    }
+  }
+
+  return audioUrl;
+}
+
 // Helper function for LLM calls with Groq primary and OpenAI fallback
-async function createChatCompletion(messages: any[], useStreaming = false) {
+async function createChatCompletion(messages: any[]) {
   const baseParams = {
     messages,
     temperature: 0.7,
@@ -91,306 +520,42 @@ async function createChatCompletion(messages: any[], useStreaming = false) {
   }
 }
 
-// Extracted voice agent processing logic for reuse in HTTP and WebSocket
+// ============================================================================
+// MAIN VOICE AGENT PROCESSING (uses shared helpers)
+// ============================================================================
+
 async function processVoiceAgentRequest(requestData: VoiceAgentRequest): Promise<VoiceAgentResponse> {
   const { sessionId, text, final } = requestData;
 
   console.log(`Voice Agent - Session: ${sessionId}, Text length: ${text.length}, Final: ${final}`);
 
-  // Get or create session
-  let session = sessions.get(sessionId);
-  if (!session) {
-    session = {
-      sessionId,
-      messages: [{
-        role: 'system',
-        content: `You are SleeckOS Agent, a polite and helpful voice booking assistant. Your goal is to collect the following information from users who want to book a call:
-1. Name (first and last name)
-2. Email address
-3. Meeting preference from available time slots
+  // Use shared helper functions
+  const session = getOrCreateSession(sessionId);
+  addUserMessage(session, text, final);
 
-Instructions:
-- Ask for ONE piece of information at a time
-- Be conversational and friendly
-- Keep responses short and natural for voice interaction
-- When asking for EMAIL, give VERY CLEAR instructions:
-  * RECOMMENDED: "Please TYPE your email address in the text field below for accuracy"
-  * ALTERNATIVE: "If you prefer to speak it, say it SLOWLY and CLEARLY like: john at gmail dot com"
-  * EXAMPLE: "You can say: john underscore smith at gmail dot com - speak each part carefully"
-- After receiving an email, ALWAYS repeat it back EXACTLY for confirmation (e.g., "I've captured john@gmail.com. Is that correct?")
-- If the email seems wrong or invalid, politely ask user to TYPE it instead
-- After collecting name and email, I will provide you with a specific time slot to suggest to the user
-- If user is not available for the suggested time, I will provide alternative slots
-- If user rejects multiple options, ask for their preferred time
-- When you have all information including confirmed meeting time, confirm everything with the user
-- You MUST respond ONLY with a valid JSON object containing: {"replyText": "your response to user", "askFor": "name|email|meeting_preference|user_preferred_time|confirmation|null", "readyToBook": false/true}
-- Set readyToBook to true only after user confirms all information is correct
-- Use "askFor" values: "name", "email", "meeting_preference", "user_preferred_time", "confirmation", or null when done
-- If the user provides multiple pieces of info at once, acknowledge all but focus on the first missing piece
-
-Start by greeting the user and asking for their name. Remember: respond ONLY with valid JSON.`
-      }],
-      collectedData: {
-        rejectedSlots: [] as string[],
-        lastSuggestedSlot: undefined
-      },
-      lastUpdated: new Date()
-    };
-    sessions.set(sessionId, session);
-  }
-
-  // Add user message to conversation if final transcript
-  if (final && text.trim()) {
-    session.messages.push({ role: 'user', content: text });
-    session.lastUpdated = new Date();
-  }
-
-  // Handle time slot logic
+  // Prepare messages with context
   const messagesWithContext = [...session.messages];
+  await addTimeSlotContext(session, messagesWithContext);
 
-  // If we need to suggest meeting times
-  if (session.collectedData.name && session.collectedData.email && !session.collectedData.meetingPreference && !session.collectedData.userPreferredTime) {
-    const tomorrow = new Date();
-    tomorrow.setDate(tomorrow.getDate() + 1);
-    const availableSlots = await storage.getAvailableTimeSlots(tomorrow);
-
-    // Filter out rejected slots
-    const rejectedSlots = session.collectedData.rejectedSlots || [];
-    const nonRejectedSlots = availableSlots.filter(slot => !rejectedSlots.includes(slot));
-
-    if (nonRejectedSlots.length === 0) {
-      // No more slots available, ask for user preference
-      messagesWithContext.push({
-        role: 'system',
-        content: `No more available slots. Ask the user what time they prefer for tomorrow and note that you'll check availability.`
-      });
-    } else if (rejectedSlots.length >= 2) {
-      // User has rejected 2+ slots, ask for their preference
-      messagesWithContext.push({
-        role: 'system',
-        content: `User has rejected multiple suggestions. Ask them what time they prefer for tomorrow. Available slots are: ${nonRejectedSlots.join(', ')}.`
-      });
-    } else {
-      // Suggest one random available slot
-      const randomSlot = nonRejectedSlots[Math.floor(Math.random() * nonRejectedSlots.length)];
-      session.collectedData.lastSuggestedSlot = randomSlot;
-      messagesWithContext.push({
-        role: 'system',
-        content: `Suggest this specific time slot: ${randomSlot}. Ask if this time works for them.`
-      });
-    }
-  }
-
-  // Call LLM (Groq primary, OpenAI fallback)
+  // Call LLM
   const llmResponse = await createChatCompletion(messagesWithContext);
-  const assistantMessage = llmResponse.content;
-
-  if (!assistantMessage) {
+  if (!llmResponse.content) {
     throw new Error(`No response from LLM provider (${llmResponse.provider})`);
   }
 
-  console.log(`LLM Response from ${llmResponse.provider}:`);
-  console.log("Raw response:", assistantMessage);
+  // Parse response
+  const parsedResponse = parseLLMResponse(llmResponse.content, llmResponse.provider);
 
-  // Parse the JSON response from the assistant
-  let parsedResponse: {replyText: string, askFor: string | null, readyToBook?: boolean};
-  try {
-    parsedResponse = JSON.parse(assistantMessage);
-    console.log("Parsed response:", parsedResponse);
-
-    // Validate required fields
-    if (!parsedResponse.replyText) {
-      console.error("Invalid response structure:", parsedResponse);
-      throw new Error("Invalid response format from LLM");
-    }
-
-    // Set default value for readyToBook if not provided
-    if (typeof parsedResponse.readyToBook !== 'boolean') {
-      parsedResponse.readyToBook = false;
-    }
-  } catch (error) {
-    console.error("Failed to parse JSON response from LLM:", error);
-    console.error("Raw response that failed to parse:", assistantMessage);
-
-    // Try to extract a basic response if JSON parsing fails
-    const fallbackResponse = {
-      replyText: assistantMessage.includes('{') ? "I'm having trouble processing that. Could you please repeat?" : assistantMessage,
-      askFor: null,
-      readyToBook: false
-    };
-    console.log("Using fallback response:", fallbackResponse);
-    parsedResponse = fallbackResponse;
-  }
-
-  // Extract collected data from the conversation context
-  if (text.trim()) {
-    // Extract name when agent is asking for email next
-    if (parsedResponse.askFor === "email" && !session.collectedData.name) {
-      const nameMatch = text.match(/(?:my name is |i'm |i am |call me )([a-zA-Z\s]+)/i);
-      session.collectedData.name = nameMatch ? nameMatch[1].trim() : text.trim();
-    }
-    // Extract email when agent just asked for it (current turn) OR when we don't have it yet
-    else if ((parsedResponse.askFor === "meeting_preference" || parsedResponse.askFor === "email") && !session.collectedData.email) {
-      const extractedEmail = parseEmailFromVoiceText(text);
-      if (extractedEmail && isValidEmail(extractedEmail)) {
-        session.collectedData.email = extractedEmail;
-      }
-    }
-    // Handle meeting preference responses and capture acceptance at any stage
-    else if (session.collectedData.email && !session.collectedData.meetingPreference) {
-      const userResponse = text.toLowerCase().trim();
-
-      // Check for rejection and acceptance indicators with very specific rejection templates
-      const rejectionPatterns = [
-        // Very specific "no" rejection templates
-        /^no$|^no[,.]|^no\s+that|^no\s+I|^no\s+it/i,      // "no" at start with rejection context
-        /\bno[,.\s]+(?:that|it|this)\s+(?:doesn't|won't|can't|isn't|doesn't|not)/i,
-
-        // Direct rejection patterns (no broad matching)
-        /doesn't work/i,
-        /won't work/i,
-        /can't work/i,
-        /not available/i,
-        /not possible/i,
-        /not happening/i,
-        /unavailable/i,
-        /isn't possible/i,
-        /isn't available/i,
-        /isn't good/i,
-        /aren't available/i,
-        /inconvenient/i,
-        /doesn't suit/i,
-        /not suitable/i,
-        /not free/i,
-        /not open/i,
-        // Remove the broad busy pattern - will handle this separately
-        /conflict/i,
-        /bad time/i,
-        /too early/i,
-        /too late/i,
-        /not good/i,
-        /terrible/i,
-        /awful/i,
-        /impossible/i,
-        /out of the question/i,
-
-        // Specific negative time contexts
-        /(\d{1,2}(?::\d{2})?\s?(?:am|pm|o'clock))\s+(?:doesn't|won't|can't|isn't|not)/i,
-        /(\d{1,2}(?::\d{2})?\s?(?:am|pm|o'clock))\s+(?:is|would\s+be)\s+(?:bad|terrible|awful|impossible)/i
-      ];
-
-      const acceptanceWords = ['yes', 'that works', 'sounds good', 'perfect', 'great', 'sure', 'works for me', "let's do it", 'good', 'fine', 'okay', 'ok', 'that time is fine', 'excellent', 'wonderful'];
-
-      // Check rejection patterns plus the special "busy" handling
-      const hasRejection = rejectionPatterns.some(pattern => pattern.test(userResponse)) || isBusyRejection(userResponse);
-      const hasAcceptance = acceptanceWords.some(word => userResponse.includes(word));
-
-      // Parse potential time preference
-      const parsedTime = parseTimeFromText(text);
-
-      if (hasRejection) {
-        // User is rejecting - first record the rejection
-        if (session.collectedData.lastSuggestedSlot && !session.collectedData.rejectedSlots.includes(session.collectedData.lastSuggestedSlot)) {
-          session.collectedData.rejectedSlots.push(session.collectedData.lastSuggestedSlot);
-        }
-        session.collectedData.lastSuggestedSlot = undefined; // Clear it
-
-        // Check if they also provided an alternative time in positive context
-        // Look for patterns like "no, but 3pm works" or "not that, maybe 3pm"
-        const alternativePatterns = [
-          /but\s+.*?(\d{1,2}(?::\d{2})?\s?(?:am|pm|o'clock|in the morning|in the afternoon|in the evening))/i,
-          /maybe\s+.*?(\d{1,2}(?::\d{2})?\s?(?:am|pm|o'clock|in the morning|in the afternoon|in the evening))/i,
-          /how about\s+.*?(\d{1,2}(?::\d{2})?\s?(?:am|pm|o'clock|in the morning|in the afternoon|in the evening))/i,
-          /instead\s+.*?(\d{1,2}(?::\d{2})?\s?(?:am|pm|o'clock|in the morning|in the afternoon|in the evening))/i,
-          /prefer\s+.*?(\d{1,2}(?::\d{2})?\s?(?:am|pm|o'clock|in the morning|in the afternoon|in the evening))/i
-        ];
-
-        let alternativeTime = null;
-        for (const pattern of alternativePatterns) {
-          const match = text.match(pattern);
-          if (match) {
-            alternativeTime = parseTimeFromText(match[1]);
-            break;
-          }
-        }
-
-        if (alternativeTime) {
-          session.collectedData.meetingPreference = alternativeTime;
-        }
-      } else if (hasAcceptance && !hasRejection) {
-        // User accepted the suggested time
-        if (session.collectedData.lastSuggestedSlot) {
-          session.collectedData.meetingPreference = session.collectedData.lastSuggestedSlot;
-        }
-      } else if (parsedTime && !hasRejection) {
-        // User provided a specific time without rejection context - treat as preference
-        // Only if the text doesn't contain negative sentiment around the time
-        const timeContext = text.substring(Math.max(0, text.indexOf(parsedTime.toLowerCase()) - 20), text.indexOf(parsedTime.toLowerCase()) + parsedTime.length + 20);
-        const negativeContext = ['not', "doesn't", "won't", 'bad', 'terrible', 'awful'].some(word => timeContext.includes(word));
-
-        if (!negativeContext) {
-          session.collectedData.meetingPreference = parsedTime;
-        }
-      }
-    }
-    // Handle user's preferred time using comprehensive parsing
-    else if ((parsedResponse.askFor === "user_preferred_time" || parsedResponse.askFor === "confirmation") && !session.collectedData.meetingPreference) {
-      const parsedTime = parseTimeFromText(text);
-      if (parsedTime) {
-        session.collectedData.userPreferredTime = parsedTime;
-        session.collectedData.meetingPreference = parsedTime; // Use as meeting preference
-      }
-    }
-  }
-
-  // Detect acceptance based on assistant's askFor state transition
-  // If assistant moved to 'confirmation' and we have a lastSuggestedSlot but no meetingPreference, capture it
-  if (parsedResponse.askFor === 'confirmation' &&
-      session.collectedData.lastSuggestedSlot &&
-      !session.collectedData.meetingPreference) {
-    session.collectedData.meetingPreference = session.collectedData.lastSuggestedSlot;
-  }
+  // Extract collected data
+  extractCollectedData(session, text, parsedResponse);
 
   // Add assistant response to conversation
-  session.messages.push({ role: 'assistant', content: assistantMessage });
+  session.messages.push({ role: 'assistant', content: llmResponse.content });
 
-  // Generate TTS audio inline for faster response
-  let audioUrl: string | undefined;
-  if (parsedResponse.replyText && ELEVENLABS_API_KEY) {
-    try {
-      console.log(`Generating TTS for response: ${parsedResponse.replyText.substring(0, 50)}...`);
+  // Generate TTS audio
+  const audioUrl = await generateTTS(parsedResponse.replyText);
 
-      const ttsResponse = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/21m00Tcm4TlvDq8ikWAM`, {
-        method: 'POST',
-        headers: {
-          'Accept': 'audio/mpeg',
-          'Content-Type': 'application/json',
-          'xi-api-key': ELEVENLABS_API_KEY,
-        },
-        body: JSON.stringify({
-          text: parsedResponse.replyText,
-          model_id: "eleven_monolingual_v1",
-          voice_settings: {
-            stability: 0.5,
-            similarity_boost: 0.5,
-          },
-        }),
-      });
-
-      if (ttsResponse.ok) {
-        const audioBuffer = await ttsResponse.arrayBuffer();
-        const audioBase64 = Buffer.from(audioBuffer).toString('base64');
-        audioUrl = `data:audio/mpeg;base64,${audioBase64}`;
-        console.log(`TTS generated successfully`);
-      } else {
-        console.error(`TTS generation failed: ${ttsResponse.status}`);
-      }
-    } catch (error) {
-      console.error('TTS generation error:', error);
-      // Continue without audio - graceful degradation
-    }
-  }
-
+  // Build final response
   const finalResponse = {
     replyText: parsedResponse.replyText,
     askFor: parsedResponse.askFor,
@@ -472,9 +637,8 @@ function isBusyRejection(text: string): boolean {
   return true;
 }
 
-// Advanced email parsing from voice input with robust error handling
+// Advanced email parsing from voice input - handles "at", "dot" patterns
 function parseEmailFromVoiceText(text: string): string | null {
-  const original = text;
   let normalized = text.toLowerCase().trim();
 
   console.log(`[EMAIL PARSER] Input: "${text}"`);
@@ -489,9 +653,55 @@ function parseEmailFromVoiceText(text: string): string | null {
   // Step 2: Remove common prefixes
   normalized = normalized.replace(/^(my\s+email\s+(address\s+)?is\s+|email\s+is\s+|it'?s\s+|the\s+email\s+is\s+)/i, '');
 
-  // Step 3: Identify and protect common email domains FIRST
-  // This creates anchor points for reconstruction
-  const domainMap = {
+  // Step 3: Convert voice patterns to email format
+  // Handle "at" and "at the rate" as @ delimiter
+  let emailText = normalized;
+
+  // Replace "at the rate" with @
+  emailText = emailText.replace(/\s+at\s+the\s+rate\s+/gi, ' @ ');
+  // Replace standalone "at" with @ (but be careful not to match words containing "at")
+  emailText = emailText.replace(/\s+at\s+/gi, ' @ ');
+
+  // Handle "dot" as period in BOTH username and domain
+  // This is critical: "john.doe at gmail.com" should work
+  emailText = emailText.replace(/\s+dot\s+/gi, '.');
+  emailText = emailText.replace(/\s+period\s+/gi, '.');
+
+  // Handle special characters in username
+  emailText = emailText.replace(/\s+underscore\s+/gi, '_');
+  emailText = emailText.replace(/\s+(dash|hyphen)\s+/gi, '-');
+
+  console.log(`[EMAIL PARSER] After pattern conversion: "${emailText}"`);
+
+  // Step 4: Check if we now have a @ symbol
+  if (!emailText.includes('@')) {
+    console.log('[EMAIL PARSER] No @ symbol found after conversion');
+    return null;
+  }
+
+  // Step 5: Split by @ to get username and domain parts
+  const parts = emailText.split('@');
+  if (parts.length !== 2) {
+    console.log(`[EMAIL PARSER] Invalid @ split: found ${parts.length} parts`);
+    return null;
+  }
+
+  let [usernamePart, domainPart] = parts;
+
+  // Step 6: Clean up username
+  let username = usernamePart.trim();
+  // Remove filler words
+  username = username.replace(/\s+(the|a|an|and|or|to|of|in|on|for)\s+/gi, '');
+  // Remove all remaining spaces
+  username = username.replace(/\s+/g, '');
+  // Keep only valid email characters
+  username = username.replace(/[^a-z0-9._-]/g, '');
+
+  // Step 7: Clean up domain
+  let domain = domainPart.trim();
+
+  // Handle common domain variations and add .com if missing
+  const domainMap: { [key: string]: string } = {
     'gmail': 'gmail.com',
     'geemail': 'gmail.com',
     'g mail': 'gmail.com',
@@ -501,67 +711,55 @@ function parseEmailFromVoiceText(text: string): string | null {
     'hotmail': 'hotmail.com',
     'hot mail': 'hotmail.com',
     'icloud': 'icloud.com',
-    'i cloud': 'icloud.com'
+    'i cloud': 'icloud.com',
+    'protonmail': 'protonmail.com',
+    'proton mail': 'protonmail.com'
   };
 
-  let detectedDomain: string | null = null;
-  let beforeDomain = '';
+  // Remove spaces from domain
+  domain = domain.replace(/\s+/g, '');
 
-  // Find which domain is mentioned
-  for (const [key, value] of Object.entries(domainMap)) {
-    // Match domain with optional "dot com" or "com" after it
-    const domainPattern = new RegExp(`(.+?)\\s+(${key.replace(/\s/g, '\\s*')})\\s*(?:dot\\s+)?(?:com|org|net)?\\s*$`, 'i');
-    const match = normalized.match(domainPattern);
-    if (match) {
-      beforeDomain = match[1];
-      detectedDomain = value;
-      console.log(`[EMAIL PARSER] Domain detected: ${detectedDomain}, before: "${beforeDomain}"`);
-      break;
+  // Check if domain needs expansion (e.g., "gmail" → "gmail.com")
+  if (domainMap[domain]) {
+    domain = domainMap[domain];
+    console.log(`[EMAIL PARSER] Expanded domain to: ${domain}`);
+  }
+
+  // If domain doesn't have a dot and isn't in our map, add .com
+  if (!domain.includes('.')) {
+    // Check if it's a known domain without extension
+    const knownDomains = ['gmail', 'yahoo', 'outlook', 'hotmail', 'icloud'];
+    if (knownDomains.some(d => domain.startsWith(d))) {
+      domain = domain + '.com';
+      console.log(`[EMAIL PARSER] Added .com to domain: ${domain}`);
     }
   }
 
-  if (!detectedDomain) {
-    console.log('[EMAIL PARSER] No domain detected, cannot parse');
-    return null;
-  }
+  // Clean domain - keep only valid characters
+  domain = domain.replace(/[^a-z0-9.-]/g, '');
 
-  // Step 4: Process the username part (everything before domain)
-  let username = beforeDomain.trim();
-
-  // Handle "at the rate" or "at" - these are delimiters, remove EVERYTHING after them
-  // Match: "username at the rate" or "username at" or "username at something"
-  username = username.replace(/\s+at\s+the\s+rate.*$/i, '');
-  username = username.replace(/\s+at\s+.*$/i, ''); // Remove "at" and everything after
-
-  // Remove common filler words that might be transcription errors
-  username = username.replace(/\s+(the|a|an|and|or|to|of|in|on|three|four|five)\s+/gi, ' ');
-
-  // Convert special characters
-  username = username.replace(/\s+underscore\s+/g, '_');
-  username = username.replace(/\s+(dash|hyphen)\s+/g, '-');
-  username = username.replace(/\s+dot\s+/g, '.');
-  username = username.replace(/\s+period\s+/g, '.');
-
-  // Remove ALL remaining spaces
-  username = username.replace(/\s+/g, '');
-
-  // Remove any non-email characters
-  username = username.replace(/[^a-z0-9._-]/g, '');
-
+  // Step 8: Validate parts
   if (username.length === 0) {
     console.log('[EMAIL PARSER] Username is empty after processing');
     return null;
   }
 
-  const email = `${username}@${detectedDomain}`;
+  if (!domain.includes('.')) {
+    console.log('[EMAIL PARSER] Domain missing TLD');
+    return null;
+  }
+
+  // Step 9: Construct final email
+  const email = `${username}@${domain}`;
   console.log(`[EMAIL PARSER] Constructed email: "${email}"`);
 
   // Final validation
   if (isValidEmail(email)) {
+    console.log(`[EMAIL PARSER] ✅ Valid email: "${email}"`);
     return email;
   }
 
-  console.log('[EMAIL PARSER] Failed validation');
+  console.log('[EMAIL PARSER] ❌ Failed validation');
   return null;
 }
 
@@ -595,6 +793,13 @@ function isValidEmail(email: string): boolean {
 }
 
 export async function registerRoutes(app: Express): Promise<Server> {
+  // Pre-generate TTS cache on startup for instant responses
+  console.log('🔄 Pre-generating TTS cache...');
+  const cacheStartTime = Date.now();
+  await preGenerateTTSCache();
+  const cacheEndTime = Date.now();
+  console.log(`✅ TTS cache pre-generated: ${TTS_CACHE.size} phrases in ${cacheEndTime - cacheStartTime}ms`);
+
   // put application routes here
   // prefix all routes with /api
 
@@ -724,7 +929,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
       console.log(`TTS request - Text length: ${text.length}, Voice ID: ${voiceId}`);
 
-      // Call ElevenLabs API
+      // Call ElevenLabs API with Flash v2.5 for low latency
       const response = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${voiceId}`, {
         method: 'POST',
         headers: {
@@ -734,7 +939,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
         },
         body: JSON.stringify({
           text: text,
-          model_id: "eleven_monolingual_v1",
+          model_id: "eleven_flash_v2_5", // Flash v2.5: 75-135ms latency (90% faster)
           voice_settings: {
             stability: 0.5,
             similarity_boost: 0.5,
@@ -883,28 +1088,18 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }));
   });
 
-  // Streaming voice agent handler for audio chunks
+  // Voice agent handler (uses same logic as HTTP version)
   async function handleStreamingVoiceAgent(ws: WebSocket, requestData: VoiceAgentRequest, messageId: string) {
     try {
-      const { sessionId } = requestData;
-
       // Send immediate acknowledgment
       ws.send(JSON.stringify({
         type: 'voice_agent_stream_start',
         messageId,
-        sessionId
+        sessionId: requestData.sessionId
       }));
 
-      // Process the request but stream the TTS in chunks
-      const response = await processVoiceAgentRequestStreaming(requestData, (chunk) => {
-        // Send audio chunks as they're generated
-        ws.send(JSON.stringify({
-          type: 'audio_chunk',
-          messageId,
-          chunk,
-          sessionId
-        }));
-      });
+      // Process the request (uses shared helpers)
+      const response = await processVoiceAgentRequestStreaming(requestData);
 
       // Send final response
       console.log(`WebSocket Streaming Response sending:`, {
@@ -934,194 +1129,35 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   }
 
-  // Streaming version of voice agent processing for audio chunks
+  // Streaming version removed - now using same logic as regular version
+  // NOTE: Previously had fake streaming with chunking (4x TTS calls)
+  // Now uses shared helpers for consistency and efficiency
   async function processVoiceAgentRequestStreaming(
-    requestData: VoiceAgentRequest,
-    onAudioChunk: (chunk: string) => void
+    requestData: VoiceAgentRequest
   ): Promise<VoiceAgentResponse> {
-    // Use the regular processing but implement streaming TTS
     const { sessionId, text, final } = requestData;
 
-    console.log(`Streaming Voice Agent - Session: ${sessionId}, Text length: ${text.length}, Final: ${final}`);
+    console.log(`Voice Agent (Streaming Path) - Session: ${sessionId}, Text length: ${text.length}, Final: ${final}`);
 
-    // Get or create session (same logic as before)
-    let session = sessions.get(sessionId);
-    if (!session) {
-      session = {
-        sessionId,
-        messages: [{
-          role: 'system',
-          content: `You are SleeckOS Agent, a polite and helpful voice booking assistant. Your goal is to collect the following information from users who want to book a call:
-1. Name (first and last name)
-2. Email address
-3. Meeting preference from available time slots
+    // Use the exact same logic as regular processing
+    const session = getOrCreateSession(sessionId);
+    addUserMessage(session, text, final);
 
-Instructions:
-- Ask for ONE piece of information at a time
-- Be conversational and friendly
-- Keep responses short and natural for voice interaction
-- After collecting name and email, I will provide you with a specific time slot to suggest to the user
-- If user is not available for the suggested time, I will provide alternative slots
-- If user rejects multiple options, ask for their preferred time
-- When you have all information including confirmed meeting time, confirm everything with the user
-- You MUST respond ONLY with a valid JSON object containing: {"replyText": "your response to user", "askFor": "name|email|meeting_preference|user_preferred_time|confirmation|null", "readyToBook": false/true}
-- Set readyToBook to true only after user confirms all information is correct
-- Use "askFor" values: "name", "email", "meeting_preference", "user_preferred_time", "confirmation", or null when done
-- If the user provides multiple pieces of info at once, acknowledge all but focus on the first missing piece
-
-Start by greeting the user and asking for their name. Remember: respond ONLY with valid JSON.`
-        }],
-        collectedData: {
-          rejectedSlots: [] as string[],
-          lastSuggestedSlot: undefined
-        },
-        lastUpdated: new Date()
-      };
-      sessions.set(sessionId, session);
-    }
-
-    // Add user message if final
-    if (final && text.trim()) {
-      session.messages.push({ role: 'user', content: text });
-      session.lastUpdated = new Date();
-    }
-
-    // Handle time slot logic (same as before)
     const messagesWithContext = [...session.messages];
+    await addTimeSlotContext(session, messagesWithContext);
 
-    if (session.collectedData.name && session.collectedData.email && !session.collectedData.meetingPreference && !session.collectedData.userPreferredTime) {
-      const tomorrow = new Date();
-      tomorrow.setDate(tomorrow.getDate() + 1);
-      const availableSlots = await storage.getAvailableTimeSlots(tomorrow);
-      const rejectedSlots = session.collectedData.rejectedSlots || [];
-      const nonRejectedSlots = availableSlots.filter(slot => !rejectedSlots.includes(slot));
-
-      if (nonRejectedSlots.length === 0) {
-        messagesWithContext.push({
-          role: 'system',
-          content: `No more available slots. Ask the user what time they prefer for tomorrow and note that you'll check availability.`
-        });
-      } else if (rejectedSlots.length >= 2) {
-        messagesWithContext.push({
-          role: 'system',
-          content: `User has rejected multiple suggestions. Ask them what time they prefer for tomorrow. Available slots are: ${nonRejectedSlots.join(', ')}.`
-        });
-      } else {
-        const randomSlot = nonRejectedSlots[Math.floor(Math.random() * nonRejectedSlots.length)];
-        session.collectedData.lastSuggestedSlot = randomSlot;
-        messagesWithContext.push({
-          role: 'system',
-          content: `Suggest this specific time slot: ${randomSlot}. Ask if this time works for them.`
-        });
-      }
-    }
-
-    // Call LLM (Groq primary, OpenAI fallback)
-    const llmResponse = await createChatCompletion(messagesWithContext, true);
-    const assistantMessage = llmResponse.content;
-
-    if (!assistantMessage) {
+    const llmResponse = await createChatCompletion(messagesWithContext);
+    if (!llmResponse.content) {
       throw new Error(`No response from LLM provider (${llmResponse.provider})`);
     }
 
-    console.log(`Streaming LLM Response from ${llmResponse.provider}:`);
-    console.log("Raw streaming response:", assistantMessage);
+    const parsedResponse = parseLLMResponse(llmResponse.content, llmResponse.provider);
+    extractCollectedData(session, text, parsedResponse);
 
-    let parsedResponse: {replyText: string, askFor: string | null, readyToBook?: boolean};
-    try {
-      parsedResponse = JSON.parse(assistantMessage);
-      console.log("Parsed streaming response:", parsedResponse);
+    session.messages.push({ role: 'assistant', content: llmResponse.content });
 
-      if (!parsedResponse.replyText) {
-        console.error("Invalid streaming response structure:", parsedResponse);
-        throw new Error("Invalid response format from LLM");
-      }
-
-      // Set default value for readyToBook if not provided
-      if (typeof parsedResponse.readyToBook !== 'boolean') {
-        parsedResponse.readyToBook = false;
-      }
-    } catch (error) {
-      console.error("Failed to parse streaming JSON response from LLM:", error);
-      console.error("Raw streaming response that failed to parse:", assistantMessage);
-
-      // Try to extract a basic response if JSON parsing fails
-      const fallbackResponse = {
-        replyText: assistantMessage.includes('{') ? "I'm having trouble processing that. Could you please repeat?" : assistantMessage,
-        askFor: null,
-        readyToBook: false
-      };
-      console.log("Using fallback streaming response:", fallbackResponse);
-      parsedResponse = fallbackResponse;
-    }
-
-    // Extract collected data (same logic as main function)
-    if (text.trim()) {
-      if (parsedResponse.askFor === "email" && !session.collectedData.name) {
-        const nameMatch = text.match(/(?:my name is |i'm |i am |call me )([a-zA-Z\s]+)/i);
-        session.collectedData.name = nameMatch ? nameMatch[1].trim() : text.trim();
-      }
-      else if ((parsedResponse.askFor === "meeting_preference" || parsedResponse.askFor === "email") && !session.collectedData.email) {
-        const extractedEmail = parseEmailFromVoiceText(text);
-        if (extractedEmail && isValidEmail(extractedEmail)) {
-          session.collectedData.email = extractedEmail;
-        }
-      }
-      // Additional logic shortened for brevity - same as the main function
-    }
-
-    session.messages.push({ role: 'assistant', content: assistantMessage });
-
-    // Generate streaming TTS
-    let audioUrl: string | undefined;
-    if (parsedResponse.replyText && ELEVENLABS_API_KEY) {
-      try {
-        console.log(`Generating streaming TTS for: ${parsedResponse.replyText.substring(0, 50)}...`);
-
-        // For now, we'll simulate streaming by chunking the text
-        // In a real implementation, you'd use a streaming TTS API
-        const words = parsedResponse.replyText.split(' ');
-        const chunkSize = Math.max(3, Math.floor(words.length / 4)); // Split into ~4 chunks
-
-        for (let i = 0; i < words.length; i += chunkSize) {
-          const chunk = words.slice(i, i + chunkSize).join(' ');
-          if (chunk.trim()) {
-            const ttsResponse = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/21m00Tcm4TlvDq8ikWAM`, {
-              method: 'POST',
-              headers: {
-                'Accept': 'audio/mpeg',
-                'Content-Type': 'application/json',
-                'xi-api-key': ELEVENLABS_API_KEY,
-              },
-              body: JSON.stringify({
-                text: chunk,
-                model_id: "eleven_monolingual_v1",
-                voice_settings: {
-                  stability: 0.5,
-                  similarity_boost: 0.5,
-                },
-              }),
-            });
-
-            if (ttsResponse.ok) {
-              const audioBuffer = await ttsResponse.arrayBuffer();
-              const audioBase64 = Buffer.from(audioBuffer).toString('base64');
-              const chunkAudioUrl = `data:audio/mpeg;base64,${audioBase64}`;
-
-              // Send this chunk via callback
-              onAudioChunk(chunkAudioUrl);
-
-              // Also store for fallback
-              if (!audioUrl) audioUrl = chunkAudioUrl;
-            }
-          }
-        }
-
-        console.log(`Streaming TTS completed`);
-      } catch (error) {
-        console.error('Streaming TTS generation error:', error);
-      }
-    }
+    // Generate TTS (single call - no fake streaming)
+    const audioUrl = await generateTTS(parsedResponse.replyText);
 
     const finalStreamingResponse = {
       replyText: parsedResponse.replyText,

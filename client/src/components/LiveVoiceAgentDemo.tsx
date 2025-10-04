@@ -85,6 +85,7 @@ export default function LiveVoiceAgentDemo() {
   const messageIdRef = useRef<number>(0);
   const pendingMessages = useRef<Map<string, (response: any) => void>>(new Map());
   const sessionRef = useRef<VoiceSession | null>(null);
+  const chatScrollRef = useRef<HTMLDivElement | null>(null);
   const { toast } = useToast();
   const queryClient = useQueryClient();
 
@@ -92,13 +93,12 @@ export default function LiveVoiceAgentDemo() {
   const assemblyAI = useAssemblyAI({
     sampleRate: 16000,
     formatTurns: true,
-    endOfTurnConfidenceThreshold: 0.8,
-    minEndOfTurnSilenceWhenConfident: 700,
+    endOfTurnConfidenceThreshold: 0.5, // Lower threshold for better capture (was 0.8)
+    minEndOfTurnSilenceWhenConfident: 500, // Faster turn detection (was 700ms)
     onTranscript: (event: TranscriptEvent) => {
       if (sttProvider === 'assemblyai' && session) {
         if (event.endOfTurn && event.text.trim()) {
-          // Final transcript - send to voice agent
-          setCurrentTranscript(event.text);
+          // Final transcript - send to voice agent but don't display (interim already shown)
           setInterimTranscript('');
           console.log(`🚀 Sending final transcript to LLM: "${event.text}"`);
           sendMessage(event.text, true, websocketConnected);
@@ -126,6 +126,13 @@ export default function LiveVoiceAgentDemo() {
   useEffect(() => {
     sessionRef.current = session;
   }, [session]);
+
+  // Auto-scroll chat area when new messages or transcripts appear
+  useEffect(() => {
+    if (chatScrollRef.current) {
+      chatScrollRef.current.scrollTop = chatScrollRef.current.scrollHeight;
+    }
+  }, [session?.messages, interimTranscript, currentTranscript]);
 
   // Check for Web Speech API support
   useEffect(() => {
@@ -283,6 +290,19 @@ export default function LiveVoiceAgentDemo() {
               collectedData: { ...sessionRef.current.collectedData, ...message.data.sessionState.collectedData }
             };
             setSession(updatedSession);
+
+            // Play audio if available
+            if (message.data.audioUrl) {
+              const audio = new Audio(message.data.audioUrl);
+              currentAudioRef.current = audio;
+              setIsSpeaking(true);
+              audio.onended = () => setIsSpeaking(false);
+              audio.onerror = () => setIsSpeaking(false);
+              audio.play().catch(error => {
+                console.error('Audio playback failed:', error);
+                setIsSpeaking(false);
+              });
+            }
           }
 
           resolver?.(message.data);
@@ -999,7 +1019,7 @@ export default function LiveVoiceAgentDemo() {
                 <span className="w-2 h-2 bg-green-500 rounded-full mr-2 animate-pulse"></span>
                 Conversation
               </h4>
-              <div className="space-y-3 text-sm max-h-[300px] overflow-y-auto">
+              <div ref={chatScrollRef} className="space-y-3 text-sm max-h-[300px] overflow-y-auto">
                 {session.messages.map((message, index) => (
                   <div key={index} className={`p-3 rounded-lg ${
                     message.role === 'assistant' 
